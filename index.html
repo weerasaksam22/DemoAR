@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#1f1327" />
+  <title>Cute Person AR</title>
+
+  <!-- Person detection: TensorFlow.js + COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #150f19;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #camera, #overlay {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    #camera {
+      object-fit: cover;
+      background: #000;
+    }
+
+    #overlay {
+      z-index: 5;
+      pointer-events: none;
+    }
+
+    #top-panel {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      width: min(92vw, 560px);
+      padding: 11px 14px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 18px;
+      background: rgba(32, 17, 40, .72);
+      color: #fff;
+      text-align: center;
+      font-size: 15px;
+      line-height: 1.42;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 28px rgba(0,0,0,.24);
+    }
+
+    #top-panel.found {
+      background: rgba(86, 28, 70, .76);
+      border-color: rgba(255, 190, 218, .60);
+    }
+
+    .hint {
+      display: block;
+      margin-top: 4px;
+      font-size: 12px;
+      opacity: .82;
+    }
+
+    #controls {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: max(16px, env(safe-area-inset-bottom));
+      z-index: 20;
+      display: flex;
+      justify-content: center;
+      gap: 9px;
+      padding: 0 12px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      min-height: 48px;
+      border: 0;
+      border-radius: 16px;
+      padding: 10px 15px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      touch-action: manipulation;
+      box-shadow: 0 8px 22px rgba(0,0,0,.25);
+    }
+
+    #toggle-ar { background: #fff; color: #34223b; }
+    #switch-camera { background: #ffd0e1; color: #57263e; }
+    #speed-button { background: #ffe58e; color: #553f13; }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at 50% 40%, #3b2146 0%, #150f19 72%);
+      color: white;
+      text-align: center;
+      padding: 24px;
+    }
+
+    #loading.hidden { display: none; }
+
+    .loader-card {
+      width: min(88vw, 380px);
+      padding: 24px 20px;
+      border-radius: 24px;
+      background: rgba(255,255,255,.09);
+      border: 1px solid rgba(255,255,255,.14);
+      backdrop-filter: blur(8px);
+    }
+
+    .emoji { font-size: 44px; margin-bottom: 8px; }
+    .small { margin-top: 8px; font-size: 12px; opacity: .72; }
+
+    #error-box {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 50;
+      width: min(90vw, 520px);
+      display: none;
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(60, 13, 22, .94);
+      color: white;
+      text-align: center;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <video id="camera" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+
+  <div id="top-panel">
+    กำลังเตรียมระบบตรวจจับคน…
+    <span class="hint">เมื่อพบคน จะมี AR สติ๊กเกอร์น่ารัก ๆ ลอยวนรอบตัว</span>
+  </div>
+
+  <div id="controls">
+    <button id="toggle-ar" type="button">⏸ หยุด AR</button>
+    <button id="speed-button" type="button">💫 ความเร็ว: ปกติ</button>
+    <button id="switch-camera" type="button">🔄 สลับกล้อง</button>
+  </div>
+
+  <div id="loading">
+    <div class="loader-card">
+      <div class="emoji">🌸✨🧸</div>
+      <strong>กำลังโหลด Cute Person AR</strong>
+      <div class="small">ครั้งแรกอาจใช้เวลาสักครู่ เพราะต้องโหลดโมเดลตรวจจับคน</div>
+    </div>
+  </div>
+
+  <div id="error-box"></div>
+
+  <script>
+    (() => {
+      const video = document.getElementById('camera');
+      const canvas = document.getElementById('overlay');
+      const ctx = canvas.getContext('2d');
+      const topPanel = document.getElementById('top-panel');
+      const loading = document.getElementById('loading');
+      const errorBox = document.getElementById('error-box');
+      const toggleARButton = document.getElementById('toggle-ar');
+      const speedButton = document.getElementById('speed-button');
+      const switchCameraButton = document.getElementById('switch-camera');
+
+      let model = null;
+      let stream = null;
+      let facingMode = 'environment';
+      let arEnabled = true;
+      let detecting = false;
+      let latestPersons = [];
+      let lastDetectionAt = 0;
+      let detectionInterval = 130;
+      let orbitSpeed = 1.0;
+      let frameTime = performance.now();
+      let phase = 0;
+      let smoothedPersons = [];
+
+      const speedModes = [
+        { label: 'ช้า', value: 0.55 },
+        { label: 'ปกติ', value: 1.0 },
+        { label: 'เร็ว', value: 1.65 }
+      ];
+      let speedIndex = 1;
+
+      const stickerTypes = [
+        'heart', 'star', 'flower', 'sparkle', 'cloud',
+        'heart', 'star', 'flower', 'sparkle', 'heart'
+      ];
+
+      function showError(message) {
+        errorBox.style.display = 'block';
+        errorBox.innerHTML = `<strong>ไม่สามารถเริ่ม AR ได้</strong><br>${message}<br><br><span style="font-size:12px;opacity:.78">แนะนำให้เปิดผ่าน HTTPS หรือ localhost และอนุญาต Camera Permission</span>`;
+        loading.classList.add('hidden');
+      }
+
+      function resizeCanvas() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function videoToScreenBox(bbox) {
+        const vw = video.videoWidth || 1;
+        const vh = video.videoHeight || 1;
+        const sw = window.innerWidth;
+        const sh = window.innerHeight;
+
+        const scale = Math.max(sw / vw, sh / vh);
+        const renderedW = vw * scale;
+        const renderedH = vh * scale;
+        const offsetX = (sw - renderedW) / 2;
+        const offsetY = (sh - renderedH) / 2;
+
+        let [x, y, w, h] = bbox;
+
+        if (facingMode === 'user') {
+          x = vw - x - w;
+        }
+
+        return {
+          x: offsetX + x * scale,
+          y: offsetY + y * scale,
+          w: w * scale,
+          h: h * scale
+        };
+      }
+
+      async function startCamera() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('เบราว์เซอร์นี้ไม่รองรับการเปิดกล้องผ่านเว็บ');
+        }
+
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        });
+
+        video.srcObject = stream;
+        await new Promise(resolve => {
+          if (video.readyState >= 2) return resolve();
+          video.onloadedmetadata = () => resolve();
+        });
+        await video.play();
+
+        video.style.transform = facingMode === 'user' ? 'scaleX(-1)' : 'none';
+      }
+
+      async function loadModel() {
+        await tf.ready();
+        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      }
+
+      async function detectPeople(now) {
+        if (!model || detecting || video.readyState < 2 || !arEnabled) return;
+        if (now - lastDetectionAt < detectionInterval) return;
+
+        detecting = true;
+        lastDetectionAt = now;
+
+        try {
+          const predictions = await model.detect(video, 12, 0.42);
+          latestPersons = predictions
+            .filter(p => p.class === 'person' && p.score >= 0.48)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 4);
+
+          updateSmoothPersons();
+          updateStatus();
+        } catch (err) {
+          console.warn('Detection error:', err);
+        } finally {
+          detecting = false;
+        }
+      }
+
+      function updateSmoothPersons() {
+        const next = latestPersons.map((p, index) => {
+          const b = videoToScreenBox(p.bbox);
+          const prev = smoothedPersons[index];
+          if (!prev) return { ...b, score: p.score };
+
+          const a = 0.36;
+          return {
+            x: prev.x + (b.x - prev.x) * a,
+            y: prev.y + (b.y - prev.y) * a,
+            w: prev.w + (b.w - prev.w) * a,
+            h: prev.h + (b.h - prev.h) * a,
+            score: p.score
+          };
+        });
+
+        smoothedPersons = next;
+      }
+
+      function updateStatus() {
+        const count = latestPersons.length;
+        if (count > 0 && arEnabled) {
+          topPanel.classList.add('found');
+          topPanel.innerHTML = `พบคน ${count} คนแล้ว 💖<span class="hint">Cute AR กำลังลอยวนรอบตัว</span>`;
+        } else if (arEnabled) {
+          topPanel.classList.remove('found');
+          topPanel.innerHTML = 'กำลังมองหาคนในภาพ…<span class="hint">ให้เห็นช่วงลำตัวหรือเต็มตัว จะตรวจจับได้ง่ายขึ้น</span>';
+        }
+      }
+
+      function roundedRect(x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+      }
+
+      function drawFace(cx, cy, s) {
+        ctx.save();
+        ctx.fillStyle = '#34223b';
+        ctx.beginPath();
+        ctx.arc(cx - 0.20 * s, cy - 0.02 * s, 0.055 * s, 0, Math.PI * 2);
+        ctx.arc(cx + 0.20 * s, cy - 0.02 * s, 0.055 * s, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#34223b';
+        ctx.lineWidth = Math.max(2, 0.045 * s);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.arc(cx, cy + 0.06 * s, 0.16 * s, 0.1 * Math.PI, 0.9 * Math.PI);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(255,110,160,.72)';
+        ctx.beginPath();
+        ctx.arc(cx - 0.34 * s, cy + 0.10 * s, 0.075 * s, 0, Math.PI * 2);
+        ctx.arc(cx + 0.34 * s, cy + 0.10 * s, 0.075 * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawSticker(type, x, y, size, rotation = 0, alpha = 1) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rotation);
+        ctx.globalAlpha = alpha;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.shadowColor = 'rgba(31,15,37,.26)';
+        ctx.shadowBlur = size * .12;
+        ctx.shadowOffsetY = size * .05;
+
+        const s = size;
+
+        if (type === 'heart') {
+          ctx.beginPath();
+          ctx.moveTo(0, s * .36);
+          ctx.bezierCurveTo(-s * .48, s * .03, -s * .47, -s * .28, -s * .20, -s * .34);
+          ctx.bezierCurveTo(-s * .04, -s * .38, 0, -s * .22, 0, -s * .13);
+          ctx.bezierCurveTo(0, -s * .22, s * .04, -s * .38, s * .20, -s * .34);
+          ctx.bezierCurveTo(s * .47, -s * .28, s * .48, s * .03, 0, s * .36);
+          ctx.closePath();
+          ctx.fillStyle = '#ff94b8';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = s * .12;
+          ctx.stroke();
+          drawFace(0, 0, s * .58);
+        }
+
+        if (type === 'star') {
+          ctx.beginPath();
+          for (let i = 0; i < 10; i++) {
+            const a = -Math.PI / 2 + i * Math.PI / 5;
+            const r = i % 2 === 0 ? s * .42 : s * .19;
+            const px = Math.cos(a) * r;
+            const py = Math.sin(a) * r;
+            if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fillStyle = '#ffd96f';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = s * .11;
+          ctx.stroke();
+          drawFace(0, s * .02, s * .52);
+        }
+
+        if (type === 'flower') {
+          for (let i = 0; i < 5; i++) {
+            const a = -Math.PI / 2 + i * Math.PI * 2 / 5;
+            const px = Math.cos(a) * s * .22;
+            const py = Math.sin(a) * s * .22;
+            ctx.beginPath();
+            ctx.arc(px, py, s * .19, 0, Math.PI * 2);
+            ctx.fillStyle = i % 2 ? '#ffc2d8' : '#ffa7c5';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = s * .07;
+            ctx.stroke();
+          }
+          ctx.beginPath();
+          ctx.arc(0, 0, s * .20, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffe27c';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = s * .06;
+          ctx.stroke();
+          drawFace(0, 0, s * .40);
+        }
+
+        if (type === 'sparkle') {
+          const diamond = (rx, ry, color) => {
+            ctx.beginPath();
+            ctx.moveTo(0, -ry);
+            ctx.quadraticCurveTo(rx * .25, -ry * .25, rx, 0);
+            ctx.quadraticCurveTo(rx * .25, ry * .25, 0, ry);
+            ctx.quadraticCurveTo(-rx * .25, ry * .25, -rx, 0);
+            ctx.quadraticCurveTo(-rx * .25, -ry * .25, 0, -ry);
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = s * .09;
+            ctx.stroke();
+          };
+          diamond(s * .28, s * .44, '#c9a9ff');
+        }
+
+        if (type === 'cloud') {
+          const blobs = [
+            [-s*.20, s*.04, s*.21],
+            [-s*.05, -s*.08, s*.25],
+            [s*.15, -s*.04, s*.23],
+            [s*.26, s*.07, s*.17],
+            [s*.04, s*.10, s*.28]
+          ];
+          blobs.forEach(([bx, by, br]) => {
+            ctx.beginPath();
+            ctx.arc(bx, by, br, 0, Math.PI * 2);
+            ctx.fillStyle = '#eefaff';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = s * .06;
+            ctx.stroke();
+          });
+          drawFace(0, s * .05, s * .45);
+        }
+
+        ctx.restore();
+      }
+
+      function drawPersonAR(person, personIndex, t) {
+        const { x, y, w, h } = person;
+        const cx = x + w / 2;
+        const cy = y + h * .48;
+
+        const rx = Math.max(w * .58, 92);
+        const ry = Math.max(h * .50, 150);
+        const baseSize = Math.max(42, Math.min(84, Math.min(w, h) * .18));
+
+        // Soft glowing outline around the detected person
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 190, 220, .70)';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([10, 10]);
+        roundedRect(x - 7, y - 7, w + 14, h + 14, 22);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Crown/label above head
+        const headY = Math.max(82, y - baseSize * .55);
+        drawSticker('star', cx, headY, baseSize * .88, Math.sin(t * .003 + personIndex) * .15, .98);
+
+        const count = stickerTypes.length;
+        for (let i = 0; i < count; i++) {
+          const angle = (i / count) * Math.PI * 2 + phase + personIndex * .7;
+          const wobble = Math.sin(t * .0025 + i * 1.7 + personIndex) * baseSize * .12;
+          const px = cx + Math.cos(angle) * (rx + wobble);
+          const py = cy + Math.sin(angle) * (ry + wobble * .45);
+          const depth = (Math.sin(angle) + 1) / 2;
+          const size = baseSize * (.72 + depth * .38);
+          const alpha = .75 + depth * .25;
+          drawSticker(stickerTypes[i], px, py, size, angle * .08, alpha);
+        }
+
+        // Small sparkles around shoulders
+        drawSticker('sparkle', x + w * .15, y + h * .30, baseSize * .58, 0, .9);
+        drawSticker('sparkle', x + w * .86, y + h * .36, baseSize * .48, .2, .85);
+      }
+
+      function animate(now) {
+        const dt = Math.min(40, now - frameTime);
+        frameTime = now;
+        phase += dt * 0.00115 * orbitSpeed;
+
+        ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+        if (arEnabled) {
+          smoothedPersons.forEach((person, index) => drawPersonAR(person, index, now));
+          detectPeople(now);
+        }
+
+        requestAnimationFrame(animate);
+      }
+
+      toggleARButton.addEventListener('click', () => {
+        arEnabled = !arEnabled;
+        toggleARButton.textContent = arEnabled ? '⏸ หยุด AR' : '▶ เริ่ม AR';
+        if (!arEnabled) {
+          latestPersons = [];
+          smoothedPersons = [];
+          topPanel.classList.remove('found');
+          topPanel.innerHTML = 'AR ถูกหยุดไว้<span class="hint">กล้องยังเปิดอยู่ กด “เริ่ม AR” เพื่อใช้งานต่อ</span>';
+        } else {
+          topPanel.innerHTML = 'กำลังมองหาคนในภาพ…<span class="hint">เมื่อพบคน สติ๊กเกอร์จะลอยวนรอบตัว</span>';
+        }
+      });
+
+      speedButton.addEventListener('click', () => {
+        speedIndex = (speedIndex + 1) % speedModes.length;
+        orbitSpeed = speedModes[speedIndex].value;
+        speedButton.textContent = `💫 ความเร็ว: ${speedModes[speedIndex].label}`;
+      });
+
+      switchCameraButton.addEventListener('click', async () => {
+        facingMode = facingMode === 'environment' ? 'user' : 'environment';
+        switchCameraButton.disabled = true;
+        switchCameraButton.textContent = '⏳ กำลังสลับ…';
+        latestPersons = [];
+        smoothedPersons = [];
+
+        try {
+          await startCamera();
+        } catch (err) {
+          showError(err.message || 'สลับกล้องไม่สำเร็จ');
+        } finally {
+          switchCameraButton.disabled = false;
+          switchCameraButton.textContent = '🔄 สลับกล้อง';
+        }
+      });
+
+      window.addEventListener('resize', resizeCanvas);
+      window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 250));
+
+      async function init() {
+        try {
+          resizeCanvas();
+          topPanel.innerHTML = 'กำลังขออนุญาตใช้กล้อง…<span class="hint">กรุณากด Allow / อนุญาต เมื่อเบราว์เซอร์ถาม</span>';
+
+          await startCamera();
+          topPanel.innerHTML = 'กำลังโหลดโมเดลตรวจจับคน…<span class="hint">ครั้งแรกอาจใช้เวลาสักครู่</span>';
+          await loadModel();
+
+          loading.classList.add('hidden');
+          topPanel.innerHTML = 'กำลังมองหาคนในภาพ…<span class="hint">เมื่อพบคน จะมีสติ๊กเกอร์น่ารัก ๆ ลอยวนรอบตัว</span>';
+          requestAnimationFrame(animate);
+        } catch (err) {
+          console.error(err);
+          showError(err.message || String(err));
+        }
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>
